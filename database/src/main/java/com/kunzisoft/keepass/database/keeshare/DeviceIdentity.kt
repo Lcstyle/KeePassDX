@@ -95,7 +95,8 @@ object DeviceIdentity {
     fun parseDeviceIdFromJson(json: String): String? {
         return try {
             val jsonObject = JSONObject(json)
-            jsonObject.optString("myID", null)?.takeIf { it.isNotEmpty() }
+            val id = jsonObject.optString("myID", "")
+            id.takeIf { it.isNotEmpty() }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to parse Syncthing status JSON", e)
             null

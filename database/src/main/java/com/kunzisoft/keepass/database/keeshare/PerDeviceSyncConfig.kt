@@ -20,10 +20,12 @@
 package com.kunzisoft.keepass.database.keeshare
 
 import android.util.Base64
+import android.util.Log
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.File
 import java.io.StringReader
+import java.util.concurrent.TimeUnit
 
 /**
  * Configuration for per-device KeeShare sync stored in group custom data
@@ -168,5 +170,41 @@ data class PerDeviceSyncConfig(
                 file.isFile && file.name.endsWith(CONTAINER_EXTENSION, ignoreCase = true)
             }?.sortedBy { it.name } ?: emptyList()
         }
+
+        /**
+         * Remove container files from other devices that haven't been modified
+         * within [maxAgeDays] days. Never removes the own device's file.
+         *
+         * @param syncDir The sync directory to clean up
+         * @param ownDeviceId This device's ID (its file is never removed)
+         * @param maxAgeDays Maximum age in days. Files older than this are removed.
+         *                   Set to 0 to disable cleanup.
+         * @return List of files that were deleted
+         */
+        fun cleanupStaleDeviceFiles(
+            syncDir: File,
+            ownDeviceId: String,
+            maxAgeDays: Int = 90
+        ): List<File> {
+            if (maxAgeDays <= 0) return emptyList()
+
+            val cutoffTime = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(maxAgeDays.toLong())
+            val otherDeviceFiles = listOtherDeviceFiles(syncDir, ownDeviceId)
+            val deleted = mutableListOf<File>()
+
+            for (file in otherDeviceFiles) {
+                if (file.lastModified() < cutoffTime) {
+                    if (file.delete()) {
+                        Log.i(TAG, "Cleaned up stale device file: ${file.name} " +
+                            "(age: ${TimeUnit.MILLISECONDS.toDays(System.currentTimeMillis() - file.lastModified())} days)")
+                        deleted.add(file)
+                    }
+                }
+            }
+
+            return deleted
+        }
+
+        private val TAG = PerDeviceSyncConfig::class.java.simpleName
     }
 }
