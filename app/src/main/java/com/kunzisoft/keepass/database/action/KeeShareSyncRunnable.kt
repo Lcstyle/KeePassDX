@@ -70,6 +70,15 @@ class KeeShareSyncRunnable(
             val cacheDir = File(context.cacheDir, "keeshare")
             cacheDir.mkdirs()
 
+            // Auto-upgrade classic SYNCHRONIZE references to include per-device config.
+            // This adds per-device alongside the classic ref (not replacing it), so
+            // KeePassDX writes its own container file while still writing the classic
+            // path for KeePassXC interop.
+            val upgraded = PerDeviceSyncConfig.autoUpgradeClassicReferences(kdbx)
+            if (upgraded > 0) {
+                Log.i(TAG, "Auto-upgraded $upgraded groups to per-device sync")
+            }
+
             // 1. Import from all other device containers
             val importResults = KeeShareImport.importAll(
                 database = kdbx,

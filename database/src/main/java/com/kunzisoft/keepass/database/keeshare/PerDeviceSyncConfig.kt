@@ -21,6 +21,10 @@ package com.kunzisoft.keepass.database.keeshare
 
 import android.util.Base64
 import android.util.Log
+import com.kunzisoft.keepass.database.element.CustomDataItem
+import com.kunzisoft.keepass.database.element.database.DatabaseKDBX
+import com.kunzisoft.keepass.database.element.group.GroupKDBX
+import com.kunzisoft.keepass.database.element.node.NodeHandler
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.File
@@ -203,6 +207,55 @@ data class PerDeviceSyncConfig(
             }
 
             return deleted
+        }
+
+        /**
+         * Walk all groups in [database] and auto-add per-device sync config
+         * alongside classic KeeShare references that have type SYNCHRONIZE.
+         *
+         * This enables per-device isolation (each KeePassDX device writes its
+         * own container file) while preserving the classic reference for
+         * KeePassXC interop. The sync directory is derived from the parent
+         * directory of the classic reference path.
+         *
+         * @return Number of groups that were upgraded
+         */
+        fun autoUpgradeClassicReferences(database: DatabaseKDBX): Int {
+            var upgraded = 0
+            val groupsToUpgrade = mutableListOf<Pair<GroupKDBX, KeeShareReference>>()
+
+            val handler = object : NodeHandler<GroupKDBX>() {
+                override fun operate(node: GroupKDBX): Boolean {
+                    // Skip groups that already have per-device config
+                    if (node.customData.get(KeeShareReference.PER_DEVICE_KEY) != null) return true
+                    val classicData = node.customData.get(KeeShareReference.CLASSIC_KEY) ?: return true
+                    val ref = KeeShareReference.fromClassicCustomData(classicData.value) ?: return true
+                    if (ref.type == KeeShareReference.Type.SYNCHRONIZE && ref.path.isNotEmpty()) {
+                        groupsToUpgrade.add(Pair(node, ref))
+                    }
+                    return true
+                }
+            }
+            database.rootGroup?.doForEachChild(null, handler)
+            // Also check root group
+            database.rootGroup?.let { handler.operate(it) }
+
+            for ((group, ref) in groupsToUpgrade) {
+                val syncDir = File(ref.path).parent ?: continue
+                val config = PerDeviceSyncConfig(
+                    syncDir = syncDir,
+                    password = ref.password,
+                    keepGroups = ref.keepGroups
+                )
+                group.customData.put(
+                    CustomDataItem(KeeShareReference.PER_DEVICE_KEY, toCustomData(config))
+                )
+                upgraded++
+                Log.i(TAG, "Auto-upgraded group '${group.title}' to per-device sync " +
+                    "(syncDir=$syncDir)")
+            }
+
+            return upgraded
         }
 
         private val TAG = PerDeviceSyncConfig::class.java.simpleName

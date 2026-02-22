@@ -73,70 +73,41 @@ object KeeShareExport {
         val classicGroups = mutableListOf<Pair<GroupKDBX, KeeShareReference>>()
         val perDeviceGroupIds = mutableSetOf<Any>()
 
-        // Collect all groups with per-device sync config (priority)
-        database.rootGroup?.doForEachChild(
-            null,
-            object : NodeHandler<GroupKDBX>() {
-                override fun operate(node: GroupKDBX): Boolean {
-                    if (node.customData.get(KeeShareReference.PER_DEVICE_KEY) != null) {
-                        perDeviceGroups.add(node)
-                        perDeviceGroupIds.add(node.nodeId)
-                    }
-                    return true
-                }
-            }
-        )
+        // Single pass: collect all groups with any KeeShare config
+        val groupHandler = object : NodeHandler<GroupKDBX>() {
+            override fun operate(node: GroupKDBX): Boolean {
+                val hasPerDevice = node.customData.get(KeeShareReference.PER_DEVICE_KEY) != null
+                val classicData = node.customData.get(KeeShareReference.CLASSIC_KEY)
+                val classicRef = if (classicData != null) {
+                    KeeShareReference.fromClassicCustomData(classicData.value)
+                } else null
+                val classicExportable = classicRef != null &&
+                    (classicRef.type == KeeShareReference.Type.EXPORT ||
+                     classicRef.type == KeeShareReference.Type.SYNCHRONIZE)
 
-        // Also check root group for per-device config
-        database.rootGroup?.let { root ->
-            if (root.customData.get(KeeShareReference.PER_DEVICE_KEY) != null) {
-                if (root.nodeId !in perDeviceGroupIds) {
-                    perDeviceGroups.add(root)
-                    perDeviceGroupIds.add(root.nodeId)
+                if (hasPerDevice) {
+                    perDeviceGroups.add(node)
+                    perDeviceGroupIds.add(node.nodeId)
                 }
-            }
-        }
-
-        // Collect groups with classic references (export/synchronize type)
-        // that don't already have per-device config
-        database.rootGroup?.doForEachChild(
-            null,
-            object : NodeHandler<GroupKDBX>() {
-                override fun operate(node: GroupKDBX): Boolean {
-                    if (node.nodeId in perDeviceGroupIds) return true
-                    val classicData = node.customData.get(KeeShareReference.CLASSIC_KEY)
-                    if (classicData != null) {
-                        val ref = KeeShareReference.fromClassicCustomData(classicData.value)
-                        if (ref != null && (ref.type == KeeShareReference.Type.EXPORT
-                                    || ref.type == KeeShareReference.Type.SYNCHRONIZE)) {
-                            classicGroups.add(Pair(node, ref))
-                        }
-                    }
-                    return true
+                // Classic export runs regardless of per-device presence
+                // (per-device writes PHONE01.kdbx, classic writes passwords.kdbx —
+                // both are needed when KeePassXC reads only the classic path)
+                if (classicExportable) {
+                    classicGroups.add(Pair(node, classicRef!!))
                 }
-            }
-        )
-
-        // Also check root group for classic reference
-        database.rootGroup?.let { root ->
-            if (root.nodeId !in perDeviceGroupIds) {
-                val classicData = root.customData.get(KeeShareReference.CLASSIC_KEY)
-                if (classicData != null) {
-                    val ref = KeeShareReference.fromClassicCustomData(classicData.value)
-                    if (ref != null && (ref.type == KeeShareReference.Type.EXPORT
-                                || ref.type == KeeShareReference.Type.SYNCHRONIZE)) {
-                        classicGroups.add(Pair(root, ref))
-                    }
-                }
+                return true
             }
         }
+        database.rootGroup?.doForEachChild(null, groupHandler)
+        // Also check root group (doForEachChild only walks children)
+        database.rootGroup?.let { groupHandler.operate(it) }
 
-        // Export per-device groups
+        // Export per-device groups (each device writes its own file)
         for (group in perDeviceGroups) {
             results.add(exportPerDeviceGroup(database, group, deviceId, cacheDirectory, targetFileProvider))
         }
 
-        // Export classic groups
+        // Export classic groups (writes to shared path for KeePassXC interop)
         for ((group, ref) in classicGroups) {
             results.add(exportClassicGroup(database, group, ref, cacheDirectory))
         }
