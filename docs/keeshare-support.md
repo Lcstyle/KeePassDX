@@ -566,6 +566,239 @@ file while the database is open).
 
 ---
 
+## Part 9: Frequently Asked Questions
+
+### General
+
+**What is KeeShare in simple terms?**
+
+KeeShare lets you share specific folders of passwords between devices — your
+phone, your laptop, your partner's tablet — without sharing your entire
+password vault. Each device keeps its own database; KeeShare just moves the
+shared parts back and forth through files that a sync tool (like Syncthing)
+carries between devices.
+
+**Do I need Syncthing to use KeeShare?**
+
+No. KeeShare reads and writes container files to a local folder. Any tool that
+syncs folders between devices will work: Syncthing, Nextcloud, Google Drive,
+Dropbox, OneDrive, or even manually copying files via USB. Syncthing is
+recommended because it is peer-to-peer (no cloud), free, open-source, and
+integrates well with KeeShareDX's auto-detection features.
+
+**Does KeeShare send my passwords over the internet?**
+
+KeeShare itself never touches the network. It only reads and writes files on
+your local storage. The sync tool you choose determines how (and whether) data
+travels over a network. Syncthing encrypts everything end-to-end between your
+devices with no third-party server. Cloud services (Google Drive, Dropbox) do
+store data on their servers, but the container files are encrypted with a
+separate password, so the cloud provider cannot read them.
+
+**Is KeeShare compatible between KeePassXC (desktop) and KeePassDX (Android)?**
+
+Yes. KeePassDX reads the same container format that KeePassXC writes, and vice
+versa. The two apps use different configuration keys internally
+(`KeeShare/Reference` for classic, `KeeShare/PerDeviceSync` for per-device),
+but they do not conflict — both can exist on the same group.
+
+---
+
+### Setup
+
+**How do I set up a shared group for the first time?**
+
+Currently, shared groups must be configured in KeePassXC on your desktop. In
+KeePassXC, right-click a group, choose "Sharing Settings," and configure the
+sync path and password. Once you save and sync the database to your phone,
+KeePassDX will see the KeeShare configuration and participate in sync.
+
+A future update (Phase 3) will add the ability to configure shared groups
+directly from KeePassDX without needing a desktop.
+
+**Can I set up KeeShare entirely from my phone without KeePassXC?**
+
+Not yet. The current implementation requires that KeeShare is first configured
+on a group — either from KeePassXC's sharing dialog or by manually adding the
+custom data. Phase 3 will add a group configuration UI to KeePassDX that lets
+you set up per-device sync directly from Android.
+
+**What is a "device ID" and why does it matter?**
+
+The device ID is a short label (like `PHONE01` or `LAPTOP7`) that identifies
+your device. Each device writes its exported passwords to a file named after
+its device ID (e.g., `PHONE01.kdbx`). This ensures devices never overwrite
+each other's files. KeePassDX auto-detects your device ID from Syncthing or
+generates a random one if Syncthing is not available. You can also set it
+manually in Settings > KeeShare.
+
+---
+
+### Syncing
+
+**I added a password on my phone. How does my laptop get it?**
+
+When you add a password and save your database, you need to trigger a KeeShare
+sync (menu > Sync KeeShare) to export the change to your device's container
+file (e.g., `PHONE01.kdbx`). Syncthing then copies that updated container to
+your laptop. KeePassXC detects the change and imports the new entry into the
+shared group.
+
+Note: in the current implementation, adding or editing entries does not
+automatically export to the container. You must either trigger a manual sync
+or wait for an auto-sync cycle (which runs when incoming changes are detected
+or on the 15-minute periodic timer). A future update will hook the export into
+every database save so that outbound changes are immediate.
+
+**I added a password on my laptop in KeePassXC. How does my phone get it?**
+
+KeePassXC exports the change to its container file (e.g., `LAPTOP7.kdbx`)
+when you save. Syncthing syncs the file to your phone. KeePassDX detects the
+new file via filesystem watching and automatically runs a sync cycle, merging
+the new entry into your database. This is fully automatic while your database
+is open.
+
+**What happens if I add the same entry on two devices at the same time?**
+
+KeeShare uses timestamp-based conflict resolution. The entry with the most
+recent modification time wins. If both entries have identical timestamps (rare),
+the merge keeps the one that was imported last. No data is silently lost — the
+"losing" version is preserved in the entry's history, which you can view and
+restore.
+
+**How often does auto-sync run?**
+
+Auto-sync has three triggers, all active while your database is open:
+1. **Instantly** — when a container file is written or moved into a watched
+   directory (filesystem watcher, sub-second detection)
+2. **On Syncthing events** — when Syncthing finishes downloading a file
+   (long-poll, typically within seconds)
+3. **Every 15 minutes** — periodic fallback timer that catches anything the
+   real-time mechanisms missed
+
+**Does auto-sync work when the database is locked or the app is closed?**
+
+No. Auto-sync only runs while a database with KeeShare groups is open in
+KeePassDX. When you lock the database or close the app, all watchers and
+timers stop. The next time you open the database, a sync will pick up any
+changes that arrived while the app was closed.
+
+**Will auto-sync export my changes automatically?**
+
+Currently, auto-sync only triggers when it detects *incoming* changes (new or
+updated container files from other devices). When it does trigger, it runs a
+full cycle (import + export), so your changes do get exported — but only as a
+side effect of an incoming sync.
+
+If no other device syncs, your local changes remain unexported until you
+manually tap "Sync KeeShare" or the 15-minute periodic timer fires. A future
+update will add export-on-save to close this gap.
+
+---
+
+### Compatibility
+
+**Will this break my existing KeePassXC setup?**
+
+No. KeePassDX preserves all KeeShare custom data when saving the database.
+Classic KeeShare references (`KeeShare/Reference`) are read and respected.
+Per-device configuration uses a separate key (`KeeShare/PerDeviceSync`) that
+KeePassXC simply ignores. Your desktop setup will continue to work unchanged.
+
+**Can KeePassXC and KeePassDX use different sync models on the same group?**
+
+Yes. A group can have both a classic reference (for KeePassXC) and a per-device
+config (for KeePassDX) simultaneously. KeePassDX will prefer the per-device
+config when both are present. KeePassXC only reads the classic reference. The
+container files may differ in naming convention, but both will contain the
+same entries after sync.
+
+**Does KeeShare work with KDB (older) databases?**
+
+No. KeeShare requires the KDBX format (version 4) because it uses CustomData
+to store sharing configuration. KDB databases do not support CustomData. If
+you are using a KDB database, you will need to convert it to KDBX first
+(KeePassXC and KeePassDX both support this).
+
+---
+
+### Security
+
+**Can someone intercept my shared passwords?**
+
+Container files are fully encrypted KDBX databases. Even if someone intercepts
+a container file in transit or on a shared drive, they cannot read it without
+the reference password. The reference password is stored inside your main
+database (protected by your master password) and is never sent over the
+network.
+
+**What if someone replaces a container file with a malicious one?**
+
+In the current implementation, unsigned containers are trusted if they decrypt
+successfully with the reference password. An attacker who knows the reference
+password could craft a malicious container. Phase 4 will add cryptographic
+signatures (RSA-2048/SHA-256) to verify container authenticity — a container
+signed by an untrusted key would be rejected.
+
+For now, the security relies on: (1) the reference password remaining secret,
+and (2) the sync channel being trustworthy (Syncthing uses TLS encryption
+between devices).
+
+**Could a malicious device ID cause problems?**
+
+No. Device IDs are sanitized to alphanumeric characters only before being used
+as filenames. An ID like `../../etc/passwd` would become `etcpasswd.kdbx`,
+preventing any path traversal attack.
+
+---
+
+### Troubleshooting
+
+**"Sync KeeShare" does not appear in my menu**
+
+This menu item is only visible when:
+- The database is KDBX format (not KDB)
+- The database is not in read-only mode
+- You are in the group list view (not viewing a single entry)
+
+If all conditions are met and the item is still missing, ensure at least one
+group in your database has KeeShare configuration (set up via KeePassXC or
+custom data).
+
+**Sync completes but says "imported 0 entries"**
+
+This usually means:
+- No container files from other devices exist in the sync directory yet
+- The container files are encrypted with a different password than your
+  reference
+- Syncthing has not finished transferring the container files
+- The sync directory path on Android does not match the configured path
+
+Check the sync directory on your phone's filesystem to verify container files
+are present and accessible.
+
+**My device ID changed and now there's a duplicate container**
+
+This can happen if app data was cleared or you switched Syncthing instances.
+The old container (e.g., `ABC12.kdbx`) will be automatically cleaned up after
+90 days. To clean it up immediately, delete the old container file manually
+from the sync directory. Your current device ID is shown in Settings >
+KeeShare.
+
+**Sync seems slow or does not trigger automatically**
+
+Auto-sync depends on the filesystem watcher detecting file changes. Some
+Android devices or storage locations (external SD cards, cloud-mounted
+directories) may not support `inotify` reliably. In these cases, the 15-minute
+periodic timer serves as a fallback. You can always trigger an immediate sync
+via the menu.
+
+If you have Syncthing configured, ensure the API URL and key are correct in
+Settings > KeeShare. The Syncthing event poller provides a second real-time
+detection mechanism independent of the filesystem watcher.
+
+---
+
 ## Appendix A: File Inventory
 
 ### New Files (This Implementation)
