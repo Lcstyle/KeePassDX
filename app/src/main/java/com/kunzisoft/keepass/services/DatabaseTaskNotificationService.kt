@@ -718,17 +718,6 @@ open class DatabaseTaskNotificationService : LockNotificationService(), Progress
                         syncDirs.add(config.syncDir)
                     }
                 }
-                // Also collect classic reference directories
-                val classicData = node.customData.get(KeeShareReference.CLASSIC_KEY)
-                if (classicData != null) {
-                    val ref = KeeShareReference.fromClassicCustomData(classicData.value)
-                    if (ref != null && ref.path.isNotEmpty()) {
-                        val parentDir = File(ref.path).parent
-                        if (parentDir != null) {
-                            syncDirs.add(parentDir)
-                        }
-                    }
-                }
                 return true
             }
         }

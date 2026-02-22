@@ -149,13 +149,21 @@ handles getting those files to and from other devices.
 ### The Problem with Classic KeeShare
 
 KeePassXC's classic approach uses a **single container file per group**. All
-devices read from and write to the same file. This works reasonably well on
-desktop where Syncthing can manage file locks and conflict detection, but it
-creates problems on mobile:
+devices read from and write to the same file (e.g., `passwords.kdbx`). This
+fundamentally does not work with file-sync tools like Syncthing because:
 
-- Android apps cannot reliably lock files on shared storage
-- If two devices export at nearly the same time, one write can overwrite the other
-- There is no way to tell which device last updated the container
+- **Sync conflicts are inevitable**: If two devices export at nearly the same
+  time, the file sync tool sees two different versions of the same file. Syncthing
+  creates a `.sync-conflict` copy, and one device's changes are silently lost
+  unless manually resolved
+- **Android apps cannot reliably lock files** on shared storage
+- **There is no conflict-free merge path**: The classic model has one path for
+  both import and export — there is no way for a device to write its changes
+  without overwriting what another device wrote
+
+This is not a theoretical concern. Any multi-device setup using classic KeeShare
+with Syncthing will eventually produce conflict files. The more devices and the
+more frequent the saves, the faster conflicts appear.
 
 ### Per-Device Containers
 
@@ -204,7 +212,9 @@ Per-device sync is configured via a separate custom data key
 | KeepGroups| Whether to preserve subgroup structure in containers  |
 
 When both classic and per-device configurations exist on the same group,
-per-device takes priority.
+per-device takes priority for export. For import, KeePassDX reads from both
+classic containers (to get KeePassXC's changes) and per-device containers
+(to get other mobile devices' changes).
 
 ### Stale Device Cleanup
 
@@ -439,18 +449,46 @@ timestamp-based conflict resolution:
 | Scenario                                   | Status  |
 |--------------------------------------------|---------|
 | Import containers created by KeePassXC     | Works   |
-| Export containers readable by KeePassXC    | Works   |
-| Classic single-file sync (import direction)| Works   |
-| Classic single-file sync (export direction)| Works   |
+| Import from classic single-file references | Works   |
+| Per-device export (each device writes own file) | Works |
 | Per-device sync between KeePassDX devices  | Works   |
-| Mixed: KeePassXC classic + KeePassDX per-device on same group | Works (per-device takes priority) |
+| Auto-upgrade classic references to per-device | Works |
 | Unsigned containers (.kdbx)                | Works   |
 | Signed containers (.kdbx.share)            | Read-only (signature verification deferred) |
+
+### What Is NOT Supported (By Design)
+
+| Scenario                                   | Reason  |
+|--------------------------------------------|---------|
+| Classic single-file export                 | Creates unavoidable Syncthing conflicts when multiple devices write to the same file |
+
+KeePassDX uses **per-device export only**. Each device writes to its own
+container file (e.g., `PHONE01.kdbx`), never to a shared single file. This
+avoids the fundamental problem where two devices writing to `passwords.kdbx`
+at nearly the same time creates a Syncthing conflict file and data divergence.
+
+Classic single-file **import** is still supported — KeePassDX can read containers
+written by KeePassXC's classic export. But KeePassDX never writes to the classic
+path. Instead, groups with classic SYNCHRONIZE references are automatically
+upgraded to include per-device config (see "Auto-Upgrade" below).
+
+### Auto-Upgrade from Classic References
+
+When KeePassDX opens a database that has classic `KeeShare/Reference` entries
+with type SYNCHRONIZE, it automatically adds per-device sync config
+(`KeeShare/PerDeviceSync`) alongside the classic reference. The sync directory
+is derived from the parent directory of the classic reference path. For example,
+if the classic path is `~/Sync/KeeShare/passwords.kdbx`, the per-device sync
+directory becomes `~/Sync/KeeShare/`.
+
+The classic reference is preserved for KeePassXC compatibility — KeePassXC
+continues to read and write via the classic path. KeePassDX uses the per-device
+config for its own exports.
 
 ### Compatibility Notes
 
 - KeePassXC stores references under `KeeShare/Reference`; KeePassDX reads and
-  respects this format without modification
+  respects this format for **import only**
 - KeePassDX's per-device sync uses a separate key (`KeeShare/PerDeviceSync`)
   that KeePassXC ignores, so the two do not interfere
 - Container files use standard KDBX format — any KeePass-compatible tool can
@@ -468,15 +506,38 @@ timestamp-based conflict resolution:
        ▼                                    ▼
   ~/Sync/Passwords/                 /storage/.../Sync/Passwords/
   ├── Team/                         ├── Team/
-  │   ├── LAPTOP7.kdbx             │   ├── LAPTOP7.kdbx
-  │   └── PHONE01.kdbx             │   └── PHONE01.kdbx
-  └── Family/                       └── Family/
-      ├── LAPTOP7.kdbx                 ├── LAPTOP7.kdbx
-      └── PHONE01.kdbx                 └── PHONE01.kdbx
+  │   ├── passwords.kdbx  ← KeePassXC reads/writes this (classic)
+  │   ├── LAPTOP7.kdbx    ← KeePassXC per-device file (future)
+  │   └── PHONE01.kdbx    ← KeePassDX writes this (per-device)
+  └── Family/
+      ├── passwords.kdbx
+      ├── LAPTOP7.kdbx
+      └── PHONE01.kdbx
 ```
 
-Both devices write their own container files and read from the other's.
-Syncthing keeps the directories mirrored. KeeShare handles the merge logic.
+KeePassDX writes only `PHONE01.kdbx` and reads from all other files (including
+`passwords.kdbx` from KeePassXC). KeePassXC currently reads/writes only
+`passwords.kdbx`. A future KeePassXC enhancement would add per-device support
+so all devices use the conflict-free per-device model.
+
+### Planned: KeePassXC Per-Device Enhancement
+
+The current setup has an asymmetry: KeePassDX uses per-device files while
+KeePassXC uses the classic single-file approach. This means KeePassXC cannot
+read entries exported by KeePassDX (which are in `PHONE01.kdbx`, not
+`passwords.kdbx`).
+
+The long-term solution is to enhance KeePassXC to also support per-device sync:
+- KeePassXC would write to `LAPTOP7.kdbx` instead of (or in addition to)
+  `passwords.kdbx`
+- KeePassXC would import from ALL `.kdbx` files in the sync directory (not just
+  the one referenced path)
+- This makes all devices fully symmetric: each writes its own file, each reads
+  from all others
+
+This enhancement requires changes to KeePassXC's sharing implementation to
+support directory-based multi-file import alongside the existing single-file
+model. See the KeePassXC project for contribution guidelines.
 
 ---
 
@@ -640,13 +701,19 @@ manually in Settings > KeeShare.
 
 **I added a password on my phone. How does my laptop get it?**
 
-Automatically. When you add a password and save your database, KeePassDX
-immediately exports the updated container file to the sync directory. Syncthing
-detects the change and copies the container to your laptop. KeePassXC detects
-the updated container and imports the new entry into the shared group.
+When you save, KeePassDX exports to its per-device container file (e.g.,
+`PHONE01.kdbx`). Syncthing syncs this file to your desktop. However,
+**KeePassXC currently cannot read per-device container files** — it only reads
+the single file specified in its classic reference (e.g., `passwords.kdbx`).
 
-The flow is: save database on phone → export-on-save writes container →
-Syncthing syncs to desktop → KeePassXC imports.
+Until KeePassXC is enhanced to support per-device import (scanning all `.kdbx`
+files in the sync directory), phone → desktop sync requires one of:
+- Manually opening `PHONE01.kdbx` in KeePassXC and merging
+- Waiting for the planned KeePassXC per-device enhancement
+- Using a second KeePassDX device (which does support per-device import)
+
+Phone → phone sync works fully today. Desktop → phone sync works fully today.
+Phone → desktop sync is the gap that needs KeePassXC enhancement.
 
 **I added a password on my laptop in KeePassXC. How does my phone get it?**
 
@@ -702,11 +769,13 @@ KeePassXC simply ignores. Your desktop setup will continue to work unchanged.
 
 **Can KeePassXC and KeePassDX use different sync models on the same group?**
 
-Yes. A group can have both a classic reference (for KeePassXC) and a per-device
-config (for KeePassDX) simultaneously. KeePassDX will prefer the per-device
-config when both are present. KeePassXC only reads the classic reference. The
-container files may differ in naming convention, but both will contain the
-same entries after sync.
+Yes. A group has both a classic reference (for KeePassXC) and a per-device
+config (for KeePassDX) simultaneously. KeePassDX auto-upgrades classic
+references to include per-device config while preserving the classic reference
+for KeePassXC. KeePassDX imports from both classic and per-device containers
+but only exports to its own per-device file. KeePassXC reads/writes only the
+classic reference. Currently, phone → desktop sync requires KeePassXC to be
+enhanced with per-device import support (see Part 6).
 
 **Does KeeShare work with KDB (older) databases?**
 
@@ -873,10 +942,20 @@ KeePassXC uses, so it can see the KeeShare configuration.
 4. Return to the database
 
 KeePassDX will now:
+- **Auto-upgrade** the classic KeeShare reference to include per-device sync
+  config (the classic reference is preserved for KeePassXC compatibility)
 - **Import** entries from the container file that KeePassXC exported
-- **Export** entries back to the same container file after every save
-- **Auto-sync** when it detects changes to the container via filesystem
-  watching, Syncthing event polling, or periodic checks
+  (`passwords.kdbx`) AND from any other device container files in the sync
+  directory
+- **Export** entries to its own per-device container file (e.g., `PHONE01.kdbx`)
+  after every save
+- **Auto-sync** when it detects changes via filesystem watching, Syncthing
+  event polling, or periodic checks
+
+**Note**: KeePassDX writes only to its own per-device file, never to the classic
+`passwords.kdbx`. This means KeePassXC will not see changes from KeePassDX until
+KeePassXC is enhanced to support per-device import (see Part 6). For now, the
+sync is one-way: desktop → phone.
 
 ### Step 5: Verify the Sync
 
@@ -908,12 +987,15 @@ specific group instead of the root:
 
 ### Sharing Between Multiple KeePassDX Devices
 
-If you have multiple Android devices, each will use the same classic KeeShare
-container path configured in KeePassXC. For better multi-device support,
-consider using per-device sync (which gives each device its own container file
-to avoid write conflicts). Per-device sync requires adding the
-`KeeShare/PerDeviceSync` custom data to the group, which currently must be
-done outside of the KeePassDX UI.
+KeePassDX uses per-device sync by default — each device writes its own
+container file and reads from all others. If you have multiple Android devices:
+
+1. Each device auto-detects or generates its own device ID
+2. Each writes to its own file (e.g., `PHONE01.kdbx`, `TABLET.kdbx`)
+3. Each imports from all other devices' files
+
+No additional configuration is needed. Multi-device sync between KeePassDX
+devices works fully out of the box.
 
 ---
 
@@ -970,6 +1052,28 @@ done outside of the KeePassDX UI.
 | **Phase 1** | Core protocol: reference parsing, container I/O, import/export, per-device sync, device identity |
 | **Phase 2** | Minimal UI: manual sync menu, service integration, settings screen, visual indicators |
 | **Phase 5** | Auto-sync: FileObserver, Syncthing event polling, periodic sync, export-on-save, stale cleanup |
+
+### Architecture Decision: Per-Device Export Only
+
+Classic single-file export (where all devices write to the same `passwords.kdbx`)
+was evaluated and rejected. The fundamental problem is that file-sync tools like
+Syncthing cannot merge KDBX files — when two devices write to the same file, one
+version wins and the other becomes a `.sync-conflict` file. This is inherent to
+the classic KeeShare model and cannot be fixed without changing the protocol.
+
+Per-device export avoids this entirely: each device writes to its own file, so
+no two devices ever conflict. The trade-off is that KeePassXC currently cannot
+read per-device container files, making phone → desktop sync a gap until
+KeePassXC is enhanced.
+
+### Planned: KeePassXC Per-Device Enhancement
+
+To close the phone → desktop sync gap, KeePassXC needs to be enhanced to:
+1. Import from ALL `.kdbx` files in a sync directory (not just one referenced path)
+2. Export to a per-device file (`{DEVICE_ID}.kdbx`) instead of the shared path
+3. Support the `KeeShare/PerDeviceSync` custom data key
+
+This would make the protocol fully symmetric across all clients.
 
 ### Unplanned
 

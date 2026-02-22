@@ -31,9 +31,15 @@ import java.io.File
 
 /**
  * Orchestrates KeeShare export: walks all groups in the database looking for
- * sync config in custom data (per-device or classic KeeShare references),
- * clones group content into temporary container databases, and writes them
- * as KDBX container files.
+ * per-device sync config in custom data, clones group content into temporary
+ * container databases, and writes them as per-device KDBX container files.
+ *
+ * Each device writes its own container file (e.g. PHONE01.kdbx, DESKTOP.kdbx)
+ * to the shared sync directory. This avoids file conflicts when multiple devices
+ * sync via Syncthing or similar tools — no two devices ever write to the same file.
+ *
+ * Classic single-file KeeShare export (where all devices write to one shared file)
+ * is intentionally NOT supported because it creates unavoidable sync conflicts.
  */
 object KeeShareExport {
 
@@ -48,12 +54,11 @@ object KeeShareExport {
     )
 
     /**
-     * Export all groups that have KeeShare config (per-device or classic) to
-     * their respective container files.
+     * Export all groups that have per-device KeeShare config to their
+     * respective container files.
      *
-     * Per-device config (KeeShare/PerDeviceSync) takes priority. Groups with
-     * only a classic reference (KeeShare/Reference) are exported if the type
-     * is EXPORT or SYNCHRONIZE.
+     * Each device writes its own container file (e.g. PHONE01.kdbx) to the
+     * shared sync directory. Other devices import from these files.
      *
      * @param database The source database containing shared groups
      * @param deviceId This device's short ID (for naming per-device container files)
@@ -70,30 +75,12 @@ object KeeShareExport {
     ): List<ExportResult> {
         val results = mutableListOf<ExportResult>()
         val perDeviceGroups = mutableListOf<GroupKDBX>()
-        val classicGroups = mutableListOf<Pair<GroupKDBX, KeeShareReference>>()
-        val perDeviceGroupIds = mutableSetOf<Any>()
 
-        // Single pass: collect all groups with any KeeShare config
+        // Collect all groups with per-device KeeShare config
         val groupHandler = object : NodeHandler<GroupKDBX>() {
             override fun operate(node: GroupKDBX): Boolean {
-                val hasPerDevice = node.customData.get(KeeShareReference.PER_DEVICE_KEY) != null
-                val classicData = node.customData.get(KeeShareReference.CLASSIC_KEY)
-                val classicRef = if (classicData != null) {
-                    KeeShareReference.fromClassicCustomData(classicData.value)
-                } else null
-                val classicExportable = classicRef != null &&
-                    (classicRef.type == KeeShareReference.Type.EXPORT ||
-                     classicRef.type == KeeShareReference.Type.SYNCHRONIZE)
-
-                if (hasPerDevice) {
+                if (node.customData.get(KeeShareReference.PER_DEVICE_KEY) != null) {
                     perDeviceGroups.add(node)
-                    perDeviceGroupIds.add(node.nodeId)
-                }
-                // Classic export runs regardless of per-device presence
-                // (per-device writes PHONE01.kdbx, classic writes passwords.kdbx —
-                // both are needed when KeePassXC reads only the classic path)
-                if (classicExportable) {
-                    classicGroups.add(Pair(node, classicRef!!))
                 }
                 return true
             }
@@ -102,14 +89,8 @@ object KeeShareExport {
         // Also check root group (doForEachChild only walks children)
         database.rootGroup?.let { groupHandler.operate(it) }
 
-        // Export per-device groups (each device writes its own file)
         for (group in perDeviceGroups) {
             results.add(exportPerDeviceGroup(database, group, deviceId, cacheDirectory, targetFileProvider))
-        }
-
-        // Export classic groups (writes to shared path for KeePassXC interop)
-        for ((group, ref) in classicGroups) {
-            results.add(exportClassicGroup(database, group, ref, cacheDirectory))
         }
 
         return results
@@ -144,40 +125,6 @@ object KeeShareExport {
             ExportResult(groupName, containerPath, entryCount, success = true)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to export $groupName to $containerPath", e)
-            ExportResult(groupName, containerPath, 0, success = false,
-                errorMessage = e.message)
-        }
-    }
-
-    /**
-     * Export a group with a classic KeeShare reference directly to the
-     * reference path. Uses atomic write to prevent partial file syncing.
-     */
-    private fun exportClassicGroup(
-        database: DatabaseKDBX,
-        group: GroupKDBX,
-        ref: KeeShareReference,
-        cacheDirectory: File
-    ): ExportResult {
-        val groupName = group.title
-        val containerPath = ref.path
-
-        return try {
-            val targetFile = File(containerPath)
-            val parentDir = targetFile.parentFile
-            if (parentDir != null && !parentDir.isDirectory) {
-                parentDir.mkdirs()
-            }
-
-            val containerDb = buildContainerDatabase(database, group, ref.password, ref.keepGroups, cacheDirectory)
-            val entryCount = countEntries(containerDb)
-
-            KeeShareContainer.writeUnsignedAtomic(containerDb, targetFile, ref.password)
-
-            Log.i(TAG, "Exported $entryCount entries from $groupName to $containerPath (classic)")
-            ExportResult(groupName, containerPath, entryCount, success = true)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to export $groupName to $containerPath (classic)", e)
             ExportResult(groupName, containerPath, 0, success = false,
                 errorMessage = e.message)
         }
