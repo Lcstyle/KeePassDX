@@ -41,6 +41,7 @@ import com.kunzisoft.keepass.database.action.CreateDatabaseRunnable
 import com.kunzisoft.keepass.database.action.LoadDatabaseRunnable
 import com.kunzisoft.keepass.database.action.KeeShareSyncRunnable
 import com.kunzisoft.keepass.database.action.MergeDatabaseRunnable
+import com.kunzisoft.keepass.database.keeshare.KeeShareExport
 import com.kunzisoft.keepass.database.keeshare.KeeShareReference
 import com.kunzisoft.keepass.database.keeshare.PerDeviceSyncConfig
 import com.kunzisoft.keepass.keeshare.KeeShareFileObserver
@@ -465,6 +466,12 @@ open class DatabaseTaskNotificationService : LockNotificationService(), Progress
                                         mLastLocalSaveTime = System.currentTimeMillis()
                                         mSnapFileDatabaseInfo = newSnapFileDatabaseInfo
                                     }
+                                    // Export KeeShare containers after every save
+                                    // (except during KeeShare sync which already exports)
+                                    if (result.isSuccess
+                                        && intentAction != ACTION_DATABASE_KEESHARE_SYNC_TASK) {
+                                        triggerKeeShareExportAfterSave(database)
+                                    }
                                 }
                                 removeIntentData(intent)
                                 TimeoutHelper.releaseTemporarilyDisableTimeout()
@@ -702,21 +709,32 @@ open class DatabaseTaskNotificationService : LockNotificationService(), Progress
 
         // Collect sync directories from groups with KeeShare config
         val syncDirs = mutableSetOf<String>()
-        kdbx.rootGroup?.doForEachChild(
-            null,
-            object : com.kunzisoft.keepass.database.element.node.NodeHandler<com.kunzisoft.keepass.database.element.group.GroupKDBX>() {
-                override fun operate(node: com.kunzisoft.keepass.database.element.group.GroupKDBX): Boolean {
-                    val perDeviceData = node.customData.get(KeeShareReference.PER_DEVICE_KEY)
-                    if (perDeviceData != null) {
-                        val config = PerDeviceSyncConfig.fromCustomData(perDeviceData.value)
-                        if (config != null) {
-                            syncDirs.add(config.syncDir)
+        val groupHandler = object : com.kunzisoft.keepass.database.element.node.NodeHandler<com.kunzisoft.keepass.database.element.group.GroupKDBX>() {
+            override fun operate(node: com.kunzisoft.keepass.database.element.group.GroupKDBX): Boolean {
+                val perDeviceData = node.customData.get(KeeShareReference.PER_DEVICE_KEY)
+                if (perDeviceData != null) {
+                    val config = PerDeviceSyncConfig.fromCustomData(perDeviceData.value)
+                    if (config != null) {
+                        syncDirs.add(config.syncDir)
+                    }
+                }
+                // Also collect classic reference directories
+                val classicData = node.customData.get(KeeShareReference.CLASSIC_KEY)
+                if (classicData != null) {
+                    val ref = KeeShareReference.fromClassicCustomData(classicData.value)
+                    if (ref != null && ref.path.isNotEmpty()) {
+                        val parentDir = File(ref.path).parent
+                        if (parentDir != null) {
+                            syncDirs.add(parentDir)
                         }
                     }
-                    return true
                 }
+                return true
             }
-        )
+        }
+        kdbx.rootGroup?.doForEachChild(null, groupHandler)
+        // Also check root group
+        kdbx.rootGroup?.let { groupHandler.operate(it) }
 
         if (syncDirs.isEmpty()) return
 
@@ -798,6 +816,48 @@ open class DatabaseTaskNotificationService : LockNotificationService(), Progress
             }
         }
         return false
+    }
+
+    /**
+     * Lightweight export-only: writes container files for all KeeShare-configured
+     * groups without importing or re-saving the database. Runs on IO thread.
+     * Called after every successful database save so outbound changes propagate
+     * to container files immediately.
+     */
+    private fun triggerKeeShareExportAfterSave(database: ContextualDatabase) {
+        val kdbx = database.databaseKDBX ?: return
+        if (database.isReadOnly) return
+
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val deviceId = KeeShareSyncRunnable.resolveDeviceId(applicationContext)
+                val cacheDir = File(cacheDir, "keeshare")
+                cacheDir.mkdirs()
+
+                val results = KeeShareExport.exportAll(
+                    database = kdbx,
+                    deviceId = deviceId,
+                    cacheDirectory = cacheDir,
+                    targetFileProvider = { syncDir, devId ->
+                        val dir = File(syncDir)
+                        if (!dir.isDirectory) dir.mkdirs()
+                        File(dir, PerDeviceSyncConfig.containerFileName(devId))
+                    }
+                )
+
+                val exported = results.filter { it.success }
+                if (exported.isNotEmpty()) {
+                    PreferencesUtil.setKeeShareLastSyncTime(
+                        applicationContext, System.currentTimeMillis()
+                    )
+                    Log.i(TAG, "KeeShare export-on-save: exported " +
+                        "${exported.sumOf { it.entriesExported }} entries to " +
+                        "${exported.size} containers")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "KeeShare export-on-save failed", e)
+            }
+        }
     }
 
     private fun startDatabaseServiceForKeeShareSync() {

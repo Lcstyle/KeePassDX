@@ -608,20 +608,22 @@ but they do not conflict — both can exist on the same group.
 
 **How do I set up a shared group for the first time?**
 
-Currently, shared groups must be configured in KeePassXC on your desktop. In
-KeePassXC, right-click a group, choose "Sharing Settings," and configure the
-sync path and password. Once you save and sync the database to your phone,
-KeePassDX will see the KeeShare configuration and participate in sync.
+Configure the shared group in KeePassXC on your desktop. Right-click a group
+(including the root group if you want to share everything), choose "Sharing
+Settings," set the type to "Synchronize," choose a container file path inside
+a Syncthing-shared folder, and set a password. Save the database and sync it
+to your phone. KeePassDX will see the KeeShare configuration and participate
+in sync automatically — both importing from and exporting to the same
+container path.
 
-A future update (Phase 3) will add the ability to configure shared groups
-directly from KeePassDX without needing a desktop.
+See "Part 10: Step-by-Step Configuration Guide" below for detailed
+instructions.
 
 **Can I set up KeeShare entirely from my phone without KeePassXC?**
 
-Not yet. The current implementation requires that KeeShare is first configured
-on a group — either from KeePassXC's sharing dialog or by manually adding the
-custom data. Phase 3 will add a group configuration UI to KeePassDX that lets
-you set up per-device sync directly from Android.
+Not currently. The sharing configuration must be set on the group's custom
+data, and KeePassDX does not yet have a UI for this. Use KeePassXC on desktop
+to configure the shared group, then sync the database to your phone.
 
 **What is a "device ID" and why does it matter?**
 
@@ -638,17 +640,13 @@ manually in Settings > KeeShare.
 
 **I added a password on my phone. How does my laptop get it?**
 
-When you add a password and save your database, you need to trigger a KeeShare
-sync (menu > Sync KeeShare) to export the change to your device's container
-file (e.g., `PHONE01.kdbx`). Syncthing then copies that updated container to
-your laptop. KeePassXC detects the change and imports the new entry into the
-shared group.
+Automatically. When you add a password and save your database, KeePassDX
+immediately exports the updated container file to the sync directory. Syncthing
+detects the change and copies the container to your laptop. KeePassXC detects
+the updated container and imports the new entry into the shared group.
 
-Note: in the current implementation, adding or editing entries does not
-automatically export to the container. You must either trigger a manual sync
-or wait for an auto-sync cycle (which runs when incoming changes are detected
-or on the 15-minute periodic timer). A future update will hook the export into
-every database save so that outbound changes are immediate.
+The flow is: save database on phone → export-on-save writes container →
+Syncthing syncs to desktop → KeePassXC imports.
 
 **I added a password on my laptop in KeePassXC. How does my phone get it?**
 
@@ -685,14 +683,11 @@ changes that arrived while the app was closed.
 
 **Will auto-sync export my changes automatically?**
 
-Currently, auto-sync only triggers when it detects *incoming* changes (new or
-updated container files from other devices). When it does trigger, it runs a
-full cycle (import + export), so your changes do get exported — but only as a
-side effect of an incoming sync.
-
-If no other device syncs, your local changes remain unexported until you
-manually tap "Sync KeeShare" or the 15-minute periodic timer fires. A future
-update will add export-on-save to close this gap.
+Yes. Every time the database is saved (adding, editing, or deleting entries),
+KeePassDX automatically exports updated container files. This happens
+immediately after the save completes, on a background thread, without
+requiring any manual action. Syncthing then picks up the changed container
+and carries it to other devices.
 
 ---
 
@@ -799,6 +794,129 @@ detection mechanism independent of the filesystem watcher.
 
 ---
 
+## Part 10: Step-by-Step Configuration Guide
+
+This guide walks through setting up KeeShare to sync your entire password
+database between KeePassXC (desktop) and KeePassDX (Android) using Syncthing.
+
+### What You Need
+
+- **KeePassXC** installed on your desktop (Linux, macOS, or Windows)
+- **KeePassDX** installed on your Android device
+- **Syncthing** installed on both devices
+- Your password database in **KDBX format** (version 4)
+
+### Step 1: Set Up Syncthing
+
+Create a shared folder in Syncthing that both devices can access:
+
+**On your desktop:**
+1. Open Syncthing (web UI at `http://localhost:8384`)
+2. Add a shared folder, e.g., `~/Sync/KeeShare/`
+3. Share this folder with your Android device
+
+**On your phone:**
+1. Open Syncthing for Android
+2. Accept the shared folder from your desktop
+3. Note the local path (e.g., `/storage/emulated/0/Syncthing/KeeShare/`)
+4. Wait for initial sync to complete
+
+### Step 2: Configure KeePassXC (Desktop)
+
+1. Open your database in KeePassXC
+2. In the menu bar, go to **Database > Settings > KeeShare**
+   - If this is your first time, KeeShare will ask you to generate a key pair
+     (for signed containers). You can skip this if you only need unsigned sync
+3. Close the database settings
+
+Now configure the root group (to share the entire database):
+
+4. In the left sidebar, **right-click the root group** (the top-level group
+   with your database name)
+5. Select **"Sharing settings"** (or "KeeShare" depending on KeePassXC version)
+6. Configure:
+   - **Type**: Select **"Synchronize"** (bidirectional: both import and export)
+   - **Path**: Click browse and navigate to your Syncthing shared folder.
+     Choose a filename, e.g.:
+     ```
+     ~/Sync/KeeShare/passwords.kdbx
+     ```
+   - **Password**: Enter a strong password for the container file. This is
+     separate from your database master password. Both devices need the same
+     password.
+7. Click **OK** to save
+8. Save the database (**Ctrl+S**)
+
+KeePassXC will immediately export a container file to the path you specified.
+You should see `passwords.kdbx` appear in your Syncthing folder.
+
+### Step 3: Sync the Database to Your Phone
+
+Your main `.kdbx` database file (not the container) needs to be accessible on
+your phone. You can:
+
+- Store it in a Syncthing-shared folder (simplest)
+- Copy it via USB
+- Use any cloud sync that both devices can access
+
+The important thing is that KeePassDX opens the **same database file** that
+KeePassXC uses, so it can see the KeeShare configuration.
+
+### Step 4: Configure KeePassDX (Android)
+
+1. Open the database in KeePassDX
+2. Go to **Settings > KeeShare**
+3. Configure (optional but recommended):
+   - **Syncthing API URL**: `http://localhost:8384` (default, usually correct)
+   - **Syncthing API Key**: Copy from Syncthing Android app > Settings > API Key
+   - **Device ID**: Leave blank to auto-detect from Syncthing
+4. Return to the database
+
+KeePassDX will now:
+- **Import** entries from the container file that KeePassXC exported
+- **Export** entries back to the same container file after every save
+- **Auto-sync** when it detects changes to the container via filesystem
+  watching, Syncthing event polling, or periodic checks
+
+### Step 5: Verify the Sync
+
+**Test desktop → phone:**
+1. On KeePassXC, add a new entry to any group under the shared root
+2. Save the database (Ctrl+S)
+3. Wait a few seconds for Syncthing to transfer the updated container
+4. On KeePassDX, tap the overflow menu (three dots) > **"Sync KeeShare"**
+5. The new entry should appear
+
+**Test phone → desktop:**
+1. On KeePassDX, add a new entry to any group
+2. Save the entry (KeePassDX auto-saves)
+3. KeePassDX automatically exports to the container (export-on-save)
+4. Wait for Syncthing to transfer the container to your desktop
+5. On KeePassXC, the entry should appear after the next sync cycle
+   (KeePassXC watches for container file changes)
+
+### Alternative: Sharing a Specific Group
+
+If you don't want to share the entire database, configure KeeShare on a
+specific group instead of the root:
+
+1. In KeePassXC, create a group (e.g., "Shared Passwords")
+2. Right-click the group > Sharing settings
+3. Set Type to "Synchronize", choose a path in your Syncthing folder, set a
+   password
+4. Only entries in this group (and its subgroups) will be synced
+
+### Sharing Between Multiple KeePassDX Devices
+
+If you have multiple Android devices, each will use the same classic KeeShare
+container path configured in KeePassXC. For better multi-device support,
+consider using per-device sync (which gives each device its own container file
+to avoid write conflicts). Per-device sync requires adding the
+`KeeShare/PerDeviceSync` custom data to the group, which currently must be
+done outside of the KeePassDX UI.
+
+---
+
 ## Appendix A: File Inventory
 
 ### New Files (This Implementation)
@@ -843,18 +961,22 @@ detection mechanism independent of the filesystem watcher.
 
 ---
 
-## Appendix B: Phased Implementation
+## Appendix B: Implementation Status
 
-The KeeShare implementation was designed in phases for incremental delivery:
+### Implemented
 
-| Phase | Scope | Status |
-|-------|-------|--------|
-| **Phase 1** | Core protocol: reference parsing, container I/O, import/export, per-device sync, device identity | Complete |
-| **Phase 2** | Minimal UI: manual sync menu, service integration, settings screen, visual indicators | Complete |
-| **Phase 3** | Group-level configuration UI (edit dialog for setting up per-device sync) | Planned |
-| **Phase 4** | Signed container support (RSA-2048 signature verification, trust management) | Planned |
-| **Phase 5** | Auto-sync: FileObserver, Syncthing event polling, periodic sync, stale cleanup | Complete |
-| **Phase 6** | Conflict resolution UI (manual merge for timestamp ties) | Planned |
+| Phase | Scope |
+|-------|-------|
+| **Phase 1** | Core protocol: reference parsing, container I/O, import/export, per-device sync, device identity |
+| **Phase 2** | Minimal UI: manual sync menu, service integration, settings screen, visual indicators |
+| **Phase 5** | Auto-sync: FileObserver, Syncthing event polling, periodic sync, export-on-save, stale cleanup |
 
-Phases 1, 2, and 5 are implemented. Phases 3, 4, and 6 are planned for future
-development.
+### Unplanned
+
+These features are not currently scheduled but could be added in the future:
+
+| Feature | Description |
+|---------|-------------|
+| Group configuration UI | Edit dialog in KeePassDX to set up per-device sync on a group without needing KeePassXC |
+| Signed containers | RSA-2048/SHA-256 signature verification for `.kdbx.share` files; trust management UI |
+| Conflict resolution UI | Manual merge dialog for timestamp-tie conflicts |

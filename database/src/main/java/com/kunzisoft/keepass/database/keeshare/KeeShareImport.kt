@@ -71,7 +71,7 @@ object KeeShareImport {
         val results = mutableListOf<ImportResult>()
         val groupsToProcess = mutableListOf<GroupKDBX>()
 
-        // Collect all groups with KeeShare config (including root itself)
+        // Collect all groups with KeeShare config
         database.rootGroup?.doForEachChild(
             null,
             object : NodeHandler<GroupKDBX>() {
@@ -85,6 +85,15 @@ object KeeShareImport {
                 }
             }
         )
+
+        // Also check root group (doForEachChild only walks children)
+        database.rootGroup?.let { root ->
+            val hasPerDevice = root.customData.get(KeeShareReference.PER_DEVICE_KEY) != null
+            val hasClassic = root.customData.get(KeeShareReference.CLASSIC_KEY) != null
+            if (hasPerDevice || hasClassic) {
+                groupsToProcess.add(0, root)
+            }
+        }
 
         for (group in groupsToProcess) {
             results.addAll(importGroup(database, group, ownDeviceId, cacheDirectory,
