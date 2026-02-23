@@ -806,16 +806,10 @@
     <string name="keeshare_sync_error">KeeShare sync failed: %1$s</string>
     <string name="keeshare_settings_title">KeeShare</string>
     <string name="settings_keeshare_key" translatable="false">settings_keeshare_key</string>
-    <string name="keeshare_settings_summary">Syncthing API key, device ID, and sync settings</string>
-    <string name="keeshare_syncthing_api_url_key" translatable="false">keeshare_syncthing_api_url</string>
-    <string name="keeshare_syncthing_api_url_title">Syncthing API URL</string>
-    <string name="keeshare_syncthing_api_url_summary">Base URL for the local Syncthing REST API</string>
-    <string name="keeshare_syncthing_api_key_key" translatable="false">keeshare_syncthing_api_key</string>
-    <string name="keeshare_syncthing_api_key_title">Syncthing API key</string>
-    <string name="keeshare_syncthing_api_key_summary">Required for reading device ID from Syncthing</string>
+    <string name="keeshare_settings_summary">Device ID and sync settings</string>
     <string name="keeshare_device_id_key" translatable="false">keeshare_device_id</string>
     <string name="keeshare_device_id_title">Device ID</string>
-    <string name="keeshare_device_id_summary">Short identifier for this device (auto-detected from Syncthing, or set manually)</string>
+    <string name="keeshare_device_id_summary">Short identifier for this device (auto-generated, or set manually)</string>
     <string name="keeshare_last_sync_time_key" translatable="false">keeshare_last_sync_time</string>
     <string name="keeshare_stale_days_key" translatable="false">keeshare_stale_days</string>
 </resources>

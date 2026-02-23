@@ -20,8 +20,10 @@
 package com.kunzisoft.keepass.database.action
 
 import android.content.Context
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import androidx.documentfile.provider.DocumentFile
 import com.kunzisoft.keepass.database.ContextualDatabase
 import com.kunzisoft.keepass.database.element.binary.BinaryData
 import com.kunzisoft.keepass.database.keeshare.DeviceIdentity
@@ -32,7 +34,6 @@ import com.kunzisoft.keepass.hardware.HardwareKey
 import com.kunzisoft.keepass.settings.PreferencesUtil
 import com.kunzisoft.keepass.tasks.ProgressTaskUpdater
 import java.io.File
-import java.io.FileInputStream
 import java.io.InputStream
 
 class KeeShareSyncRunnable(
@@ -70,33 +71,13 @@ class KeeShareSyncRunnable(
             val cacheDir = File(context.cacheDir, "keeshare")
             cacheDir.mkdirs()
 
-            // Auto-upgrade classic SYNCHRONIZE references to include per-device config.
-            // This adds per-device alongside the classic ref (not replacing it), so
-            // KeePassDX writes its own container file while still writing the classic
-            // path for KeePassXC interop.
-            val upgraded = PerDeviceSyncConfig.autoUpgradeClassicReferences(kdbx)
-            if (upgraded > 0) {
-                Log.i(TAG, "Auto-upgraded $upgraded groups to per-device sync")
-            }
-
-            // 1. Import from all other device containers
+            // 1. Import from all other device containers via SAF
             val importResults = KeeShareImport.importAll(
                 database = kdbx,
                 ownDeviceId = deviceId,
                 cacheDirectory = cacheDir,
-                fileProvider = { syncDir, ownId ->
-                    val dir = File(syncDir)
-                    if (!dir.isDirectory) {
-                        emptyList()
-                    } else {
-                        PerDeviceSyncConfig.listOtherDeviceFiles(dir, ownId).map { file ->
-                            file.name to FileInputStream(file) as InputStream
-                        }
-                    }
-                },
-                singleFileProvider = { path ->
-                    val file = File(path)
-                    if (file.exists()) FileInputStream(file) else null
+                fileProvider = { syncDirUri, ownId ->
+                    listOtherDeviceStreams(context, syncDirUri, ownId)
                 },
                 isRAMSufficient = { memoryWanted ->
                     BinaryData.canMemoryBeAllocatedInRAM(context, memoryWanted)
@@ -107,17 +88,13 @@ class KeeShareSyncRunnable(
             importedDevices = importResults.filter { it.success }
                 .map { it.containerName }.distinct().size
 
-            // 2. Export own container for each shared group
+            // 2. Export own container for each shared group via SAF
             val exportResults = KeeShareExport.exportAll(
                 database = kdbx,
                 deviceId = deviceId,
                 cacheDirectory = cacheDir,
-                targetFileProvider = { syncDir, devId ->
-                    val dir = File(syncDir)
-                    if (!dir.isDirectory) {
-                        dir.mkdirs()
-                    }
-                    File(dir, PerDeviceSyncConfig.containerFileName(devId))
+                targetStreamProvider = { syncDirUri, devId ->
+                    openTargetOutputStream(context, syncDirUri, devId)
                 }
             )
 
@@ -162,30 +139,80 @@ class KeeShareSyncRunnable(
          *
          * Priority:
          * 1. User-configured device ID in preferences
-         * 2. Syncthing API (using configured URL and API key)
-         * 3. Generate and persist a fallback random ID
+         * 2. Generate and persist a fallback random ID
          */
         fun resolveDeviceId(context: Context): String {
-            // Check for user-configured device ID
             val configuredId = PreferencesUtil.getKeeShareDeviceId(context)
             if (!configuredId.isNullOrEmpty()) {
                 return configuredId
             }
 
-            // Try Syncthing API
-            val apiUrl = PreferencesUtil.getKeeShareSyncthingApiUrl(context)
-            val apiKey = PreferencesUtil.getKeeShareSyncthingApiKey(context)
-            val syncthingId = DeviceIdentity.getDeviceIdShort(apiUrl, apiKey)
-            if (!syncthingId.isNullOrEmpty()) {
-                // Persist the detected ID
-                PreferencesUtil.setKeeShareDeviceId(context, syncthingId)
-                return syncthingId
-            }
-
-            // Generate and persist a fallback ID
             val fallbackId = DeviceIdentity.generateFallbackDeviceId()
             PreferencesUtil.setKeeShareDeviceId(context, fallbackId)
             return fallbackId
+        }
+
+        /**
+         * List other devices' container files via SAF and return open InputStreams.
+         */
+        fun listOtherDeviceStreams(
+            context: Context,
+            syncDirUri: String,
+            ownDeviceId: String
+        ): List<Pair<String, InputStream>> {
+            val treeUri = try {
+                Uri.parse(syncDirUri)
+            } catch (e: Exception) {
+                Log.w(TAG, "Invalid sync dir URI: $syncDirUri", e)
+                return emptyList()
+            }
+
+            val dir = DocumentFile.fromTreeUri(context, treeUri)
+            if (dir == null || !dir.exists()) {
+                Log.d(TAG, "Sync dir not accessible: $syncDirUri")
+                return emptyList()
+            }
+
+            val ownFileName = PerDeviceSyncConfig.containerFileName(ownDeviceId)
+            return dir.listFiles()
+                .filter { doc ->
+                    doc.isFile
+                        && doc.name?.endsWith(".kdbx", ignoreCase = true) == true
+                        && !doc.name.equals(ownFileName, ignoreCase = true)
+                }
+                .sortedBy { it.name }
+                .mapNotNull { doc ->
+                    val stream = context.contentResolver.openInputStream(doc.uri)
+                    if (stream != null) (doc.name ?: "unknown") to stream else null
+                }
+        }
+
+        /**
+         * Open an OutputStream to write this device's container file via SAF.
+         */
+        fun openTargetOutputStream(
+            context: Context,
+            syncDirUri: String,
+            deviceId: String
+        ): java.io.OutputStream? {
+            val treeUri = try {
+                Uri.parse(syncDirUri)
+            } catch (e: Exception) {
+                Log.w(TAG, "Invalid sync dir URI: $syncDirUri", e)
+                return null
+            }
+
+            val dir = DocumentFile.fromTreeUri(context, treeUri)
+            if (dir == null || !dir.exists()) {
+                Log.w(TAG, "Sync dir not accessible for export: $syncDirUri")
+                return null
+            }
+
+            val fileName = PerDeviceSyncConfig.containerFileName(deviceId)
+            val existing = dir.findFile(fileName)
+            val targetDoc = existing ?: dir.createFile("application/octet-stream", fileName)
+
+            return targetDoc?.uri?.let { context.contentResolver.openOutputStream(it) }
         }
     }
 }

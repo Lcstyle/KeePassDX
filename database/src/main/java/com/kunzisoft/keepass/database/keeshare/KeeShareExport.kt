@@ -28,6 +28,7 @@ import com.kunzisoft.keepass.database.element.group.GroupKDBX
 import com.kunzisoft.keepass.database.element.node.NodeHandler
 import com.kunzisoft.keepass.utils.readAllBytes
 import java.io.File
+import java.io.OutputStream
 
 /**
  * Orchestrates KeeShare export: walks all groups in the database looking for
@@ -36,10 +37,7 @@ import java.io.File
  *
  * Each device writes its own container file (e.g. PHONE01.kdbx, DESKTOP.kdbx)
  * to the shared sync directory. This avoids file conflicts when multiple devices
- * sync via Syncthing or similar tools — no two devices ever write to the same file.
- *
- * Classic single-file KeeShare export (where all devices write to one shared file)
- * is intentionally NOT supported because it creates unavoidable sync conflicts.
+ * sync via folder-sync tools — no two devices ever write to the same file.
  */
 object KeeShareExport {
 
@@ -55,23 +53,20 @@ object KeeShareExport {
 
     /**
      * Export all groups that have per-device KeeShare config to their
-     * respective container files.
-     *
-     * Each device writes its own container file (e.g. PHONE01.kdbx) to the
-     * shared sync directory. Other devices import from these files.
+     * respective container streams.
      *
      * @param database The source database containing shared groups
      * @param deviceId This device's short ID (for naming per-device container files)
      * @param cacheDirectory Directory for temporary binary storage
-     * @param targetFileProvider Resolves (syncDir, deviceId) to a target File for
-     *        per-device atomic writing.
+     * @param targetStreamProvider Resolves (syncDirUri, deviceId) to an OutputStream
+     *        for writing the container. Returns null if the target cannot be opened.
      * @return List of export results for each group processed
      */
     fun exportAll(
         database: DatabaseKDBX,
         deviceId: String,
         cacheDirectory: File,
-        targetFileProvider: (syncDir: String, deviceId: String) -> File?
+        targetStreamProvider: (syncDirUri: String, deviceId: String) -> OutputStream?
     ): List<ExportResult> {
         val results = mutableListOf<ExportResult>()
         val perDeviceGroups = mutableListOf<GroupKDBX>()
@@ -90,7 +85,7 @@ object KeeShareExport {
         database.rootGroup?.let { groupHandler.operate(it) }
 
         for (group in perDeviceGroups) {
-            results.add(exportPerDeviceGroup(database, group, deviceId, cacheDirectory, targetFileProvider))
+            results.add(exportPerDeviceGroup(database, group, deviceId, cacheDirectory, targetStreamProvider))
         }
 
         return results
@@ -101,7 +96,7 @@ object KeeShareExport {
         group: GroupKDBX,
         deviceId: String,
         cacheDirectory: File,
-        targetFileProvider: (syncDir: String, deviceId: String) -> File?
+        targetStreamProvider: (syncDirUri: String, deviceId: String) -> OutputStream?
     ): ExportResult {
         val groupName = group.title
         val perDeviceData = group.customData.get(KeeShareReference.PER_DEVICE_KEY)
@@ -113,13 +108,15 @@ object KeeShareExport {
         val containerPath = "${config.syncDir}/${PerDeviceSyncConfig.containerFileName(deviceId)}"
 
         return try {
-            val targetFile = targetFileProvider(config.syncDir, deviceId)
-                ?: return ExportResult(groupName, containerPath, 0, false, "Could not resolve target file")
+            val outputStream = targetStreamProvider(config.syncDir, deviceId)
+                ?: return ExportResult(groupName, containerPath, 0, false, "Could not open target stream")
 
             val containerDb = buildContainerDatabase(database, group, config.password, config.keepGroups, cacheDirectory)
             val entryCount = countEntries(containerDb)
 
-            KeeShareContainer.writeUnsignedAtomic(containerDb, targetFile, config.password)
+            outputStream.use { stream ->
+                KeeShareContainer.writeUnsigned(containerDb, stream, config.password)
+            }
 
             Log.i(TAG, "Exported $entryCount entries from $groupName to $containerPath")
             ExportResult(groupName, containerPath, entryCount, success = true)
@@ -183,8 +180,6 @@ object KeeShareExport {
         val clonedGroup = GroupKDBX().apply {
             updateWith(sourceGroup, updateParents = false)
         }
-        // Don't copy KeeShare config into exported containers
-        // (prevents re-export loops)
 
         containerDb.addGroupTo(clonedGroup, parentGroup)
         cloneEntriesInto(sourceDatabase, containerDb, sourceGroup, clonedGroup)

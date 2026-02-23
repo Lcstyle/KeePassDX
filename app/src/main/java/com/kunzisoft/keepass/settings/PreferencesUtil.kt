@@ -842,19 +842,6 @@ object PreferencesUtil {
 
     // KeeShare preferences
 
-    fun getKeeShareSyncthingApiUrl(context: Context): String {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-        return prefs.getString(
-            context.getString(R.string.keeshare_syncthing_api_url_key),
-            "http://localhost:8384"
-        ) ?: "http://localhost:8384"
-    }
-
-    fun getKeeShareSyncthingApiKey(context: Context): String? {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-        return prefs.getString(context.getString(R.string.keeshare_syncthing_api_key_key), null)
-    }
-
     fun getKeeShareDeviceId(context: Context): String? {
         val prefs = PreferenceManager.getDefaultSharedPreferences(context)
         return prefs.getString(context.getString(R.string.keeshare_device_id_key), null)

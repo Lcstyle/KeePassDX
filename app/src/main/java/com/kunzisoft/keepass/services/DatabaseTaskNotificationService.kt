@@ -41,11 +41,7 @@ import com.kunzisoft.keepass.database.action.CreateDatabaseRunnable
 import com.kunzisoft.keepass.database.action.LoadDatabaseRunnable
 import com.kunzisoft.keepass.database.action.KeeShareSyncRunnable
 import com.kunzisoft.keepass.database.action.MergeDatabaseRunnable
-import com.kunzisoft.keepass.database.keeshare.KeeShareExport
-import com.kunzisoft.keepass.database.keeshare.KeeShareReference
-import com.kunzisoft.keepass.database.keeshare.PerDeviceSyncConfig
-import com.kunzisoft.keepass.keeshare.KeeShareFileObserver
-import com.kunzisoft.keepass.keeshare.SyncthingEventPoller
+import com.kunzisoft.keepass.keeshare.KeeShareSyncManager
 import com.kunzisoft.keepass.database.action.ReloadDatabaseRunnable
 import com.kunzisoft.keepass.database.action.RemoveUnlinkedDataDatabaseRunnable
 import com.kunzisoft.keepass.database.action.SaveDatabaseRunnable
@@ -87,15 +83,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.util.UUID
 
 open class DatabaseTaskNotificationService : LockNotificationService(), ProgressTaskUpdater {
@@ -124,9 +116,7 @@ open class DatabaseTaskNotificationService : LockNotificationService(), Progress
     private var mProgressMessage: ProgressMessage = ProgressMessage(R.string.database_opened)
 
     // KeeShare auto-sync
-    private var keeSharePeriodicJob: Job? = null
-    private var keeShareFileObserver: KeeShareFileObserver? = null
-    private var keeShareSyncthingPollerJob: Job? = null
+    private var keeShareSyncManager: KeeShareSyncManager? = null
 
     override fun retrieveChannelId(): String {
         return CHANNEL_DATABASE_ID
@@ -447,7 +437,13 @@ open class DatabaseTaskNotificationService : LockNotificationService(), Progress
                                 if (intentAction == ACTION_DATABASE_LOAD_TASK
                                     || intentAction == ACTION_DATABASE_RELOAD_TASK) {
                                     if (result.isSuccess) {
-                                        startKeeShareAutoSync(database)
+                                        keeShareSyncManager?.stopAutoSync()
+                                        keeShareSyncManager = KeeShareSyncManager(
+                                            applicationContext, mainScope,
+                                            { mActionRunning > 0 },
+                                            { startDatabaseServiceForKeeShareSync() }
+                                        )
+                                        keeShareSyncManager?.startAutoSync(database)
                                     }
                                 }
                                 val save = !database.isReadOnly
@@ -470,7 +466,7 @@ open class DatabaseTaskNotificationService : LockNotificationService(), Progress
                                     // (except during KeeShare sync which already exports)
                                     if (result.isSuccess
                                         && intentAction != ACTION_DATABASE_KEESHARE_SYNC_TASK) {
-                                        triggerKeeShareExportAfterSave(database)
+                                        keeShareSyncManager?.triggerExportAfterSave(database)
                                     }
                                 }
                                 removeIntentData(intent)
@@ -701,154 +697,6 @@ open class DatabaseTaskNotificationService : LockNotificationService(), Progress
         updateMessage(R.string.decrypting_db)
     }
 
-    private fun startKeeShareAutoSync(database: ContextualDatabase) {
-        stopKeeShareAutoSync()
-
-        val kdbx = database.databaseKDBX ?: return
-        if (database.isReadOnly) return
-
-        // Collect sync directories from groups with KeeShare config
-        val syncDirs = mutableSetOf<String>()
-        val groupHandler = object : com.kunzisoft.keepass.database.element.node.NodeHandler<com.kunzisoft.keepass.database.element.group.GroupKDBX>() {
-            override fun operate(node: com.kunzisoft.keepass.database.element.group.GroupKDBX): Boolean {
-                val perDeviceData = node.customData.get(KeeShareReference.PER_DEVICE_KEY)
-                if (perDeviceData != null) {
-                    val config = PerDeviceSyncConfig.fromCustomData(perDeviceData.value)
-                    if (config != null) {
-                        syncDirs.add(config.syncDir)
-                    }
-                }
-                return true
-            }
-        }
-        kdbx.rootGroup?.doForEachChild(null, groupHandler)
-        // Also check root group
-        kdbx.rootGroup?.let { groupHandler.operate(it) }
-
-        if (syncDirs.isEmpty()) return
-
-        // Start FileObserver on sync directories
-        val syncDirFiles = syncDirs.map { File(it) }
-        keeShareFileObserver = KeeShareFileObserver(syncDirFiles) { _ ->
-            // Post to main thread — mActionRunning is only safe to read on the main thread
-            mainScope.launch {
-                if (mActionRunning == 0) {
-                    startDatabaseServiceForKeeShareSync()
-                }
-            }
-        }
-        keeShareFileObserver?.startWatching()
-
-        // Start periodic sync timer
-        keeSharePeriodicJob = CoroutineScope(Dispatchers.IO).launch {
-            while (isActive) {
-                delay(KEESHARE_PERIODIC_SYNC_INTERVAL_MS)
-                if (!isActive) break
-                val lastSyncTime = PreferencesUtil.getKeeShareLastSyncTime(applicationContext)
-                if (hasNewerContainerFiles(syncDirs, lastSyncTime)) {
-                    withContext(Dispatchers.Main) {
-                        startDatabaseServiceForKeeShareSync()
-                    }
-                }
-
-                // Cleanup stale device files
-                val staleDays = PreferencesUtil.getKeeShareStaleDays(applicationContext)
-                val deviceId = KeeShareSyncRunnable.resolveDeviceId(applicationContext)
-                for (syncDir in syncDirs) {
-                    PerDeviceSyncConfig.cleanupStaleDeviceFiles(
-                        File(syncDir), deviceId, staleDays
-                    )
-                }
-            }
-        }
-
-        // Start Syncthing event poller (optional — if API key is configured)
-        val apiUrl = PreferencesUtil.getKeeShareSyncthingApiUrl(applicationContext)
-        val apiKey = PreferencesUtil.getKeeShareSyncthingApiKey(applicationContext)
-        if (!apiKey.isNullOrEmpty()) {
-            keeShareSyncthingPollerJob = CoroutineScope(Dispatchers.IO).launch {
-                val poller = SyncthingEventPoller(apiUrl, apiKey, syncDirs) { _ ->
-                    mainScope.launch {
-                        startDatabaseServiceForKeeShareSync()
-                    }
-                }
-                while (isActive) {
-                    if (!poller.poll()) {
-                        // Syncthing unreachable — back off before retrying
-                        delay(KEESHARE_SYNCTHING_RETRY_DELAY_MS)
-                    }
-                }
-            }
-        }
-
-        Log.i(TAG, "KeeShare auto-sync started for ${syncDirs.size} directories")
-    }
-
-    private fun stopKeeShareAutoSync() {
-        keeSharePeriodicJob?.cancel()
-        keeSharePeriodicJob = null
-        keeShareFileObserver?.stopWatching()
-        keeShareFileObserver = null
-        keeShareSyncthingPollerJob?.cancel()
-        keeShareSyncthingPollerJob = null
-    }
-
-    private fun hasNewerContainerFiles(syncDirs: Set<String>, lastSyncTime: Long): Boolean {
-        for (syncDir in syncDirs) {
-            val dir = File(syncDir)
-            if (!dir.isDirectory) continue
-            val files = PerDeviceSyncConfig.listAllDeviceFiles(dir)
-            for (file in files) {
-                if (file.lastModified() > lastSyncTime) {
-                    return true
-                }
-            }
-        }
-        return false
-    }
-
-    /**
-     * Lightweight export-only: writes container files for all KeeShare-configured
-     * groups without importing or re-saving the database. Runs on IO thread.
-     * Called after every successful database save so outbound changes propagate
-     * to container files immediately.
-     */
-    private fun triggerKeeShareExportAfterSave(database: ContextualDatabase) {
-        val kdbx = database.databaseKDBX ?: return
-        if (database.isReadOnly) return
-
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val deviceId = KeeShareSyncRunnable.resolveDeviceId(applicationContext)
-                val cacheDir = File(cacheDir, "keeshare")
-                cacheDir.mkdirs()
-
-                val results = KeeShareExport.exportAll(
-                    database = kdbx,
-                    deviceId = deviceId,
-                    cacheDirectory = cacheDir,
-                    targetFileProvider = { syncDir, devId ->
-                        val dir = File(syncDir)
-                        if (!dir.isDirectory) dir.mkdirs()
-                        File(dir, PerDeviceSyncConfig.containerFileName(devId))
-                    }
-                )
-
-                val exported = results.filter { it.success }
-                if (exported.isNotEmpty()) {
-                    PreferencesUtil.setKeeShareLastSyncTime(
-                        applicationContext, System.currentTimeMillis()
-                    )
-                    Log.i(TAG, "KeeShare export-on-save: exported " +
-                        "${exported.sumOf { it.entriesExported }} entries to " +
-                        "${exported.size} containers")
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "KeeShare export-on-save failed", e)
-            }
-        }
-    }
-
     private fun startDatabaseServiceForKeeShareSync() {
         try {
             val syncIntent = Intent(applicationContext, DatabaseTaskNotificationService::class.java).apply {
@@ -863,7 +711,8 @@ open class DatabaseTaskNotificationService : LockNotificationService(), Progress
 
     override fun stopService() {
         if (!TimeoutHelper.temporarilyDisableLock) {
-            stopKeeShareAutoSync()
+            keeShareSyncManager?.stopAutoSync()
+            keeShareSyncManager = null
             closeDatabase(mDatabase)
             // Remove the database during the lock
             // And notify each subscriber
@@ -1537,9 +1386,6 @@ open class DatabaseTaskNotificationService : LockNotificationService(), Progress
         private val TAG = DatabaseTaskNotificationService::class.java.name
 
         private const val CHANNEL_DATABASE_ID = "com.kunzisoft.keepass.notification.channel.database"
-
-        private const val KEESHARE_PERIODIC_SYNC_INTERVAL_MS = 15 * 60 * 1000L // 15 minutes
-        private const val KEESHARE_SYNCTHING_RETRY_DELAY_MS = 5 * 60 * 1000L // 5 minutes
 
         const val ACTION_DATABASE_CREATE_TASK = "ACTION_DATABASE_CREATE_TASK"
         const val ACTION_DATABASE_LOAD_TASK = "ACTION_DATABASE_LOAD_TASK"

@@ -20,25 +20,21 @@
 package com.kunzisoft.keepass.database.keeshare
 
 import android.util.Base64
-import android.util.Log
-import com.kunzisoft.keepass.database.element.CustomDataItem
-import com.kunzisoft.keepass.database.element.database.DatabaseKDBX
-import com.kunzisoft.keepass.database.element.group.GroupKDBX
-import com.kunzisoft.keepass.database.element.node.NodeHandler
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
-import java.io.File
 import java.io.StringReader
-import java.util.concurrent.TimeUnit
 
 /**
  * Configuration for per-device KeeShare sync stored in group custom data
  * under the key [KeeShareReference.PER_DEVICE_KEY].
  *
+ * [syncDir] stores a URI string (content://...) for SAF-based access to
+ * the shared sync directory.
+ *
  * Format:
  * ```xml
  * <KeeShare.PerDeviceSync>
- *   <SyncDir>...base64-encoded-directory-path...</SyncDir>
+ *   <SyncDir>...base64-encoded-uri-string...</SyncDir>
  *   <Password>...base64-encoded-password...</Password>
  *   <KeepGroups>True|False</KeepGroups>
  * </KeeShare.PerDeviceSync>
@@ -153,111 +149,5 @@ data class PerDeviceSyncConfig(
             require(sanitized.isNotEmpty()) { "Device ID must contain at least one alphanumeric character" }
             return "$sanitized$CONTAINER_EXTENSION"
         }
-
-        /**
-         * List all container files in a sync directory except the one belonging to [ownDeviceId].
-         */
-        fun listOtherDeviceFiles(syncDir: File, ownDeviceId: String): List<File> {
-            val ownFileName = containerFileName(ownDeviceId)
-            return syncDir.listFiles { file ->
-                file.isFile
-                    && file.name.endsWith(CONTAINER_EXTENSION, ignoreCase = true)
-                    && !file.name.equals(ownFileName, ignoreCase = true)
-            }?.sortedBy { it.name } ?: emptyList()
-        }
-
-        /**
-         * List all container files in a sync directory.
-         */
-        fun listAllDeviceFiles(syncDir: File): List<File> {
-            return syncDir.listFiles { file ->
-                file.isFile && file.name.endsWith(CONTAINER_EXTENSION, ignoreCase = true)
-            }?.sortedBy { it.name } ?: emptyList()
-        }
-
-        /**
-         * Remove container files from other devices that haven't been modified
-         * within [maxAgeDays] days. Never removes the own device's file.
-         *
-         * @param syncDir The sync directory to clean up
-         * @param ownDeviceId This device's ID (its file is never removed)
-         * @param maxAgeDays Maximum age in days. Files older than this are removed.
-         *                   Set to 0 to disable cleanup.
-         * @return List of files that were deleted
-         */
-        fun cleanupStaleDeviceFiles(
-            syncDir: File,
-            ownDeviceId: String,
-            maxAgeDays: Int = 90
-        ): List<File> {
-            if (maxAgeDays <= 0) return emptyList()
-
-            val cutoffTime = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(maxAgeDays.toLong())
-            val otherDeviceFiles = listOtherDeviceFiles(syncDir, ownDeviceId)
-            val deleted = mutableListOf<File>()
-
-            for (file in otherDeviceFiles) {
-                if (file.lastModified() < cutoffTime) {
-                    if (file.delete()) {
-                        Log.i(TAG, "Cleaned up stale device file: ${file.name} " +
-                            "(age: ${TimeUnit.MILLISECONDS.toDays(System.currentTimeMillis() - file.lastModified())} days)")
-                        deleted.add(file)
-                    }
-                }
-            }
-
-            return deleted
-        }
-
-        /**
-         * Walk all groups in [database] and auto-add per-device sync config
-         * alongside classic KeeShare references that have type SYNCHRONIZE.
-         *
-         * This enables per-device isolation (each KeePassDX device writes its
-         * own container file) while preserving the classic reference for
-         * KeePassXC interop. The sync directory is derived from the parent
-         * directory of the classic reference path.
-         *
-         * @return Number of groups that were upgraded
-         */
-        fun autoUpgradeClassicReferences(database: DatabaseKDBX): Int {
-            var upgraded = 0
-            val groupsToUpgrade = mutableListOf<Pair<GroupKDBX, KeeShareReference>>()
-
-            val handler = object : NodeHandler<GroupKDBX>() {
-                override fun operate(node: GroupKDBX): Boolean {
-                    // Skip groups that already have per-device config
-                    if (node.customData.get(KeeShareReference.PER_DEVICE_KEY) != null) return true
-                    val classicData = node.customData.get(KeeShareReference.CLASSIC_KEY) ?: return true
-                    val ref = KeeShareReference.fromClassicCustomData(classicData.value) ?: return true
-                    if (ref.type == KeeShareReference.Type.SYNCHRONIZE && ref.path.isNotEmpty()) {
-                        groupsToUpgrade.add(Pair(node, ref))
-                    }
-                    return true
-                }
-            }
-            database.rootGroup?.doForEachChild(null, handler)
-            // Also check root group
-            database.rootGroup?.let { handler.operate(it) }
-
-            for ((group, ref) in groupsToUpgrade) {
-                val syncDir = File(ref.path).parent ?: continue
-                val config = PerDeviceSyncConfig(
-                    syncDir = syncDir,
-                    password = ref.password,
-                    keepGroups = ref.keepGroups
-                )
-                group.customData.put(
-                    CustomDataItem(KeeShareReference.PER_DEVICE_KEY, toCustomData(config))
-                )
-                upgraded++
-                Log.i(TAG, "Auto-upgraded group '${group.title}' to per-device sync " +
-                    "(syncDir=$syncDir)")
-            }
-
-            return upgraded
-        }
-
-        private val TAG = PerDeviceSyncConfig::class.java.simpleName
     }
 }
