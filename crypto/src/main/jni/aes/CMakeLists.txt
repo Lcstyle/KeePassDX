@@ -20,3 +20,6 @@ add_library(
 find_library(log-lib log)
 
 target_link_libraries(aes ${log-lib})
+
+# 16KB page alignment for Android 15+ (https://developer.android.com/16kb-page-size)
+target_link_options(aes PRIVATE "LINKER:-z,max-page-size=16384")

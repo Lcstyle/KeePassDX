@@ -15,3 +15,6 @@ add_library(
     src/blake2/blake2b.c
     argon2_jni.c
 )
+
+# 16KB page alignment for Android 15+ (https://developer.android.com/16kb-page-size)
+target_link_options(argon2 PRIVATE "LINKER:-z,max-page-size=16384")
